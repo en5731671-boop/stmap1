@@ -2,10 +2,11 @@ import streamlit as st
 import requests
 import pandas as pd
 import pydeck as pdk
+from datetime import datetime, timedelta
 
 # --- ページ設定 ---
-st.set_page_config(page_title="九州気温 3D Map", layout="wide")
-st.title("九州主要都市の現在の気温 3Dカラムマップ")
+st.set_page_config(page_title="九州気温スーパー3D Map", layout="wide")
+st.title("🌡️ 九州主要都市の気温 3Dマップ（スーパー進化版）")
 
 # 九州7県のデータ
 kyushu_capitals = {
@@ -18,6 +19,9 @@ kyushu_capitals = {
     'Kagoshima':  {'lat': 31.5600, 'lon': 130.5580}
 }
 
+# --- 単位切替 ---
+unit = st.radio("温度単位", ["℃", "℉"])
+
 # --- データ取得関数 ---
 @st.cache_data(ttl=600)
 def fetch_weather_data():
@@ -26,31 +30,42 @@ def fetch_weather_data():
     
     for city, coords in kyushu_capitals.items():
         params = {
-            'latitude':  coords['lat'],
+            'latitude': coords['lat'],
             'longitude': coords['lon'],
-            'current': 'temperature_2m'
+            'current_weather': True,
+            'hourly': 'temperature_2m'
         }
         try:
             response = requests.get(BASE_URL, params=params)
             response.raise_for_status()
             data = response.json()
+            
+            # 現在の気温
+            temp_c = data['current_weather']['temperature']
+            # 過去24時間の時間軸データ
+            times = data['hourly']['time']
+            temps = data['hourly']['temperature_2m']
+            
             weather_info.append({
                 'City': city,
                 'lat': coords['lat'],
                 'lon': coords['lon'],
-                'Temperature': data['current']['temperature_2m']
+                'Temperature': temp_c,
+                'HourlyTimes': times,
+                'HourlyTemps': temps
             })
         except Exception as e:
             st.error(f"Error fetching {city}: {e}")
-            
+    
     return pd.DataFrame(weather_info)
 
-# データの取得
+# --- データ取得 ---
 with st.spinner('最新の気温データを取得中...'):
     df = fetch_weather_data()
 
-# 気温を高さ（メートル）に変換（例：1度 = 3000m）
-df['elevation'] = df['Temperature'] * 3000
+# 単位変換
+if unit == "℉":
+    df['Temperature'] = df['Temperature'] * 9/5 + 32
 
 # --- メインレイアウト ---
 col1, col2 = st.columns([1, 2])
@@ -61,17 +76,34 @@ with col1:
     
     if st.button('データを更新'):
         st.cache_data.clear()
-        st.rerun()
+        st.experimental_rerun()
+    
+    # 都市選択
+    selected_city = st.selectbox("都市を選択して時系列表示", df['City'])
+    city_data = df[df['City'] == selected_city].iloc[0]
+    times = city_data['HourlyTimes']
+    temps = city_data['HourlyTemps']
+    
+    if unit == "℉":
+        temps = [t*9/5 + 32 for t in temps]
+    
+    st.line_chart(pd.DataFrame({"Temperature": temps}, index=pd.to_datetime(times)))
 
 with col2:
     st.subheader("3D カラムマップ")
-
-    # Pydeck の設定
+    
+    # 気温を高さ（メートル）に変換
+    df['elevation'] = df['Temperature'] * 3000
+    
+    # カラーを温度に応じて変化（青→赤）
+    df['color'] = df['Temperature'].apply(lambda t: [min(255, max(0, int((t-15)*10))), 100, 255 - min(255, max(0, int((t-15)*10))), 180])
+    
+    # Pydeck設定
     view_state = pdk.ViewState(
         latitude=32.7,
         longitude=131.0,
         zoom=6.2,
-        pitch=45,  # 地図を傾ける
+        pitch=45,
         bearing=0
     )
 
@@ -80,18 +112,14 @@ with col2:
         data=df,
         get_position='[lon, lat]',
         get_elevation='elevation',
-        radius=12000,        # 柱の太さ
-        get_fill_color='[255, 100, 0, 180]', # 柱の色（オレンジ系）
-        pickable=True,       # ホバーを有効に
+        radius=12000,
+        get_fill_color='color',
+        pickable=True,
         auto_highlight=True,
     )
 
-    # 描画
     st.pydeck_chart(pdk.Deck(
         layers=[layer],
         initial_view_state=view_state,
-        tooltip={
-            "html": "<b>{City}</b><br>気温: {Temperature}°C",
-            "style": {"color": "white"}
-        }
+        tooltip={"html": "<b>{City}</b><br>気温: {Temperature}°" + unit, "style": {"color": "white"}}
     ))
